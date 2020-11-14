@@ -105,6 +105,9 @@ func newSite(path string) *site {
 		}()
 		err = filepath.Walk(path,
 			func(path string, fi os.FileInfo, err error) error {
+				if fi == nil {
+					panic("path not found: '" + path + "'")
+				}
 				if fi.IsDir() {
 					return watcher.Add(path)
 				}
