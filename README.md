@@ -16,7 +16,7 @@ import (
 
 func main() {
     vars := map[string]string{
-        "MySpecialVar": "rainbows wow!",
+        "MyVar": "Hi!", // Replaces all occurrences of {{{MyVar}}} with "Hi!"
     }
     http.HandleFunc("/", static.HandlerFunc("static_files", vars))
     log.Fatal(http.ListenAndServe(":8080", nil))
