@@ -161,9 +161,16 @@ func getStaticFile(s *site, root, path string, vars map[string]string,
 	} else {
 		stat, err := os.Stat(root + path)
 		if err != nil {
-			return nil, "", err
-		}
-		if stat.IsDir() {
+			if os.IsNotExist(err) {
+				if strings.HasSuffix(path, "/index") {
+					return nil, "", err
+				}
+				data, err = ioutil.ReadFile(root + path + ".html")
+				if err != nil {
+					return nil, "", err
+				}
+			}
+		} else if stat.IsDir() {
 			contentType = "text/html"
 			data, err = ioutil.ReadFile(root + path + "/index.html")
 		} else {
