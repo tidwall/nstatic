@@ -43,8 +43,9 @@ type fileInfo struct {
 }
 
 type site struct {
-	mu    sync.RWMutex
-	cache map[string]fileInfo
+	mu      sync.RWMutex
+	cache   map[string]fileInfo
+	funcMap map[string]interface{}
 
 	ttmpl *ttemplate.Template
 	htmpl *htemplate.Template
@@ -57,6 +58,7 @@ type site struct {
 type Options struct {
 	LogOutput io.Writer
 	PageData  func(page Page) (interface{}, error)
+	FuncMap   map[string]interface{}
 }
 
 type errLogger interface {
@@ -69,9 +71,11 @@ type errLogger interface {
 func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 	var pageData func(page Page) (interface{}, error)
 	var logOutput io.Writer
+	var funcMap map[string]interface{}
 	if opts != nil {
 		pageData = opts.PageData
 		logOutput = opts.LogOutput
+		funcMap = opts.FuncMap
 	}
 	if logOutput == nil {
 		logOutput = os.Stderr
@@ -89,7 +93,7 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 		return nil, fmt.Errorf("invalid path: %s: not a directory", path)
 	}
 
-	s := newSite(path)
+	s := newSite(path, funcMap)
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		code := 0
@@ -126,7 +130,7 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 				info = getStaticFile(s, path, "/_500", r, pageData,
 					true, true, info.err)
 				if info.err != nil {
-					http.Error(w, "500 internal server error", code)
+					http.Error(w, "500 Internal Server Error", code)
 					return
 				}
 			}
@@ -159,11 +163,13 @@ func (s *site) bustCache() {
 	s.ttmplBuilder = ttemplate.New("")
 	s.htmpl = htemplate.New("")
 	s.ttmpl = ttemplate.New("")
+
 }
 
-func newSite(path string) *site {
+func newSite(path string, funcMap map[string]interface{}) *site {
 	s := &site{}
 	s.bustCache()
+	s.funcMap = funcMap
 	go func() {
 		for {
 			func() {
@@ -338,7 +344,8 @@ func getStaticFile(s *site, root, path string, r *http.Request,
 			info.isTemplate = true
 			name := info.templateName
 			if info.plainContenType() == "text/html" {
-				_, err = s.htmplBuilder.New(name).Parse(string(info.data))
+				_, err = s.htmplBuilder.New(name).
+					Funcs(s.funcMap).Parse(string(info.data))
 				info.isTextTemplate = false
 				if err == nil {
 					var htmpl *htemplate.Template
@@ -348,7 +355,8 @@ func getStaticFile(s *site, root, path string, r *http.Request,
 					}
 				}
 			} else {
-				_, err = s.ttmplBuilder.New(name).Parse(string(info.data))
+				_, err = s.ttmplBuilder.New(name).
+					Funcs(s.funcMap).Parse(string(info.data))
 				info.isTextTemplate = true
 				if err == nil {
 					var ttmpl *ttemplate.Template
