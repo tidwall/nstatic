@@ -15,10 +15,7 @@ import (
 )
 
 func main() {
-    vars := map[string]string{
-        "MyVar": "Hi!", // Replaces all occurrences of {{{MyVar}}} with "Hi!"
-    }
-    http.HandleFunc("/", static.HandlerFunc("static_files", vars))
+    http.HandleFunc("/", static.HandlerFunc("static_files", nil))
     log.Fatal(http.ListenAndServe(":8080", nil))
 }
 ```
