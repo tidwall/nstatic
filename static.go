@@ -7,8 +7,9 @@ package static
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"io"
 	"io/ioutil"
-	"log"
 	"mime"
 	"net/http"
 	"os"
@@ -52,23 +53,60 @@ type site struct {
 	htmplBuilder *htemplate.Template
 }
 
-// HandlerFunc returns an http.HandlerFunc that does very simple pages serving
-// from the specified path. The pageData function can be used to return
+// Options for the handler
+type Options struct {
+	LogOutput io.Writer
+	PageData  func(page Page) (interface{}, error)
+}
+
+type errLogger interface {
+	Error(...interface{})
+}
+
+// NewHandlerFunc returns an http.HandlerFunc that does very simple pages
+// serving from the specified path. The pageData function can be used to return
 // template data.
-func HandlerFunc(path string, pageData func(page Page) interface{},
-) http.HandlerFunc {
+func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
+	var pageData func(page Page) (interface{}, error)
+	var logOutput io.Writer
+	if opts != nil {
+		pageData = opts.PageData
+		logOutput = opts.LogOutput
+	}
+	if logOutput == nil {
+		logOutput = os.Stderr
+	}
+
 	path, err := filepath.Abs(path)
 	if err != nil {
-		log.Fatalf("%s\n", path)
+		return nil, err
 	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.IsDir() {
+		return nil, fmt.Errorf("invalid path: %s: not a directory", path)
+	}
+
 	s := newSite(path)
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		code := 0
 		start := time.Now()
+		var perr error
 		defer func() {
 			elapsed := time.Since(start)
-			log.Printf("%s %d %s %s",
-				r.Method, code, elapsed, r.URL.Path)
+			line := fmt.Sprintf("%d %s %s %s\n",
+				code, r.Method, r.URL.Path, formatSmallElapsed(elapsed))
+			if code == 200 {
+				logOutput.Write([]byte(line))
+			} else if log, ok := logOutput.(errLogger); ok {
+				log.Error(line)
+			} else {
+				logOutput.Write([]byte(line))
+			}
+			_ = perr
 		}()
 
 		info := getStaticFile(s, path, r.URL.Path, r, pageData,
@@ -84,7 +122,7 @@ func HandlerFunc(path string, pageData func(page Page) interface{},
 				}
 			} else {
 				code = 500
-				log.Printf("error: %s", info.err)
+				perr = info.err
 				info = getStaticFile(s, path, "/_500", r, pageData,
 					true, true, info.err)
 				if info.err != nil {
@@ -97,7 +135,20 @@ func HandlerFunc(path string, pageData func(page Page) interface{},
 		}
 		w.Header().Set("Content-Type", info.contentType)
 		w.Write(info.data)
+	}, nil
+}
+
+func formatSmallElapsed(elapsed time.Duration) string {
+	if elapsed < time.Microsecond {
+		return fmt.Sprintf("%dns", elapsed)
 	}
+	if elapsed < time.Millisecond {
+		return fmt.Sprintf("%dµs", elapsed/time.Microsecond)
+	}
+	if elapsed < time.Second {
+		return fmt.Sprintf("%dms", elapsed/time.Millisecond)
+	}
+	return fmt.Sprintf("%ds", elapsed/time.Second)
 }
 
 func (s *site) bustCache() {
@@ -118,7 +169,7 @@ func newSite(path string) *site {
 			func() {
 				watcher, err := fsnotify.NewWatcher()
 				if err != nil {
-					log.Fatal(err)
+					panic(err)
 				}
 				defer watcher.Close()
 				done := make(chan bool)
@@ -148,7 +199,6 @@ func newSite(path string) *site {
 						return nil
 					})
 				if err != nil {
-					log.Print(err)
 					return
 				}
 				<-done
@@ -160,7 +210,7 @@ func newSite(path string) *site {
 }
 
 func getStaticFile(s *site, root, path string, r *http.Request,
-	pageData func(page Page) interface{},
+	pageData func(page Page) (interface{}, error),
 	execTemplate, allowUnderscore bool, externalError error,
 ) (info fileInfo) {
 	s.mu.RLock()
@@ -172,12 +222,16 @@ func getStaticFile(s *site, root, path string, r *http.Request,
 			return
 		}
 		if info.err == nil && pageData != nil && info.isTemplate {
-			pdata := pageData(Page{
+			pdata, err := pageData(Page{
 				LocalPath:   info.localPath,
 				ContentType: info.contentType,
 				Request:     r,
 				Error:       externalError,
 			})
+			if err != nil {
+				info.err = err
+				return
+			}
 		again:
 			if !execTemplate {
 				return

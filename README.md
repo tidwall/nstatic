@@ -15,7 +15,11 @@ import (
 )
 
 func main() {
-    http.HandleFunc("/", static.HandlerFunc("static_files", nil))
+    handler, err := static.NewHandlerFunc("static_files", nil)
+    if err != nil {
+        log.Fatal(err)
+    }
+    http.HandleFunc("/", handler)
     log.Fatal(http.ListenAndServe(":8080", nil))
 }
 ```
