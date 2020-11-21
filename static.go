@@ -72,6 +72,21 @@ type errLogger interface {
 	Error(...interface{})
 }
 
+func dictFn(vals ...interface{}) (map[string]interface{}, error) {
+	if len(vals)%2 != 0 {
+		return nil, errors.New("wrong number of dict args")
+	}
+	dict := make(map[string]interface{}, len(vals)/2)
+	for i := 0; i < len(vals); i += 2 {
+		key, ok := vals[i].(string)
+		if !ok {
+			return nil, errors.New("dict keys must be strings")
+		}
+		dict[key] = vals[i+1]
+	}
+	return dict, nil
+}
+
 // NewHandlerFunc returns an http.HandlerFunc that does very simple pages
 // serving from the specified path. The pageData function can be used to return
 // template data.
@@ -88,6 +103,13 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 	}
 	if logOutput == nil {
 		logOutput = os.Stderr
+	}
+
+	if funcMap == nil {
+		funcMap = map[string]interface{}{}
+	}
+	if funcMap["dict"] == nil {
+		funcMap["dict"] = dictFn
 	}
 
 	path, err := filepath.Abs(path)
