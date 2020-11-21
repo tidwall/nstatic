@@ -6,6 +6,7 @@ package static
 
 import (
 	"bytes"
+	"crypto/sha1"
 	"errors"
 	"fmt"
 	"io"
@@ -22,6 +23,8 @@ import (
 	ttemplate "text/template"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/klauspost/compress/gzip"
+	"github.com/tidwall/tinylru"
 )
 
 // A Page is passed to the pageData function
@@ -38,14 +41,16 @@ type fileInfo struct {
 	isTemplate     bool
 	isTextTemplate bool
 	data           []byte
+	gzipData       []byte
 	contentType    string
 	err            error
 }
 
 type site struct {
-	mu      sync.RWMutex
-	cache   map[string]fileInfo
-	funcMap map[string]interface{}
+	mu        sync.RWMutex
+	cache     map[string]fileInfo
+	funcMap   map[string]interface{}
+	gzipCache tinylru.LRU
 
 	ttmpl *ttemplate.Template
 	htmpl *htemplate.Template
@@ -59,6 +64,7 @@ type Options struct {
 	LogOutput io.Writer
 	PageData  func(page Page) (interface{}, error)
 	FuncMap   map[string]interface{}
+	AllowGzip bool
 }
 
 type errLogger interface {
@@ -72,10 +78,12 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 	var pageData func(page Page) (interface{}, error)
 	var logOutput io.Writer
 	var funcMap map[string]interface{}
+	var allowGzip bool
 	if opts != nil {
 		pageData = opts.PageData
 		logOutput = opts.LogOutput
 		funcMap = opts.FuncMap
+		allowGzip = opts.AllowGzip
 	}
 	if logOutput == nil {
 		logOutput = os.Stderr
@@ -112,14 +120,13 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 			}
 			_ = perr
 		}()
-
 		info := getStaticFile(s, path, r.URL.Path, r, pageData,
-			true, false, nil)
+			true, false, nil, allowGzip)
 		if info.err != nil {
 			if os.IsNotExist(info.err) {
 				code = 404
 				info = getStaticFile(s, path, "/_404", r, pageData,
-					true, true, nil)
+					true, true, nil, allowGzip)
 				if info.err != nil {
 					http.NotFound(w, r)
 					return
@@ -128,7 +135,7 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 				code = 500
 				perr = info.err
 				info = getStaticFile(s, path, "/_500", r, pageData,
-					true, true, info.err)
+					true, true, info.err, allowGzip)
 				if info.err != nil {
 					http.Error(w, "500 Internal Server Error", code)
 					return
@@ -137,8 +144,32 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 		} else {
 			code = 200
 		}
+		data := info.data
+		if allowGzip {
+			if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+				w.Header().Set("Content-Encoding", "gzip")
+				if len(info.gzipData) > 0 {
+					data = info.gzipData
+				} else {
+					sum := sha1.Sum(data)
+					key := fmt.Sprintf("%s:%d", sum[:], len(data))
+					value, ok := s.gzipCache.Get(key)
+					if ok {
+						data = value.([]byte)
+					} else {
+						var buf bytes.Buffer
+						zw := gzip.NewWriter(&buf)
+						zw.Write(data)
+						zw.Close()
+						data = buf.Bytes()
+						s.gzipCache.Set(key, data)
+					}
+				}
+			}
+		}
 		w.Header().Set("Content-Type", info.contentType)
-		w.Write(info.data)
+		w.WriteHeader(code)
+		w.Write(data)
 	}, nil
 }
 
@@ -218,6 +249,7 @@ func newSite(path string, funcMap map[string]interface{}) *site {
 func getStaticFile(s *site, root, path string, r *http.Request,
 	pageData func(page Page) (interface{}, error),
 	execTemplate, allowUnderscore bool, externalError error,
+	allowGzip bool,
 ) (info fileInfo) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -258,7 +290,7 @@ func getStaticFile(s *site, root, path string, r *http.Request,
 						s.mu.RUnlock()
 						defer s.mu.RLock()
 						sinfo := getStaticFile(s, root, "/"+name, r,
-							pageData, false, true, nil)
+							pageData, false, true, nil, allowGzip)
 						if sinfo.err == nil {
 							info.err = nil
 						} else if !os.IsNotExist(sinfo.err) {
@@ -339,37 +371,48 @@ func getStaticFile(s *site, root, path string, r *http.Request,
 		contentType: mime.TypeByExtension(filepath.Ext(localPath)),
 	}
 	if pageData != nil {
-		if strings.HasPrefix(info.plainContenType(), "text/") {
+		mimeType := info.plainContenType()
+		switch {
+		case mimeType == "text/html":
+			// html template
 			info.templateName = info.localPath
 			info.isTemplate = true
-			name := info.templateName
-			if info.plainContenType() == "text/html" {
-				_, err = s.htmplBuilder.New(name).
-					Funcs(s.funcMap).Parse(string(info.data))
-				info.isTextTemplate = false
+			info.isTextTemplate = false
+			_, err = s.htmplBuilder.New(info.templateName).
+				Funcs(s.funcMap).Parse(string(info.data))
+			if err == nil {
+				var htmpl *htemplate.Template
+				htmpl, err = s.htmplBuilder.Clone()
 				if err == nil {
-					var htmpl *htemplate.Template
-					htmpl, err = s.htmplBuilder.Clone()
-					if err == nil {
-						s.htmpl = htmpl
-					}
+					s.htmpl = htmpl
 				}
-			} else {
-				_, err = s.ttmplBuilder.New(name).
-					Funcs(s.funcMap).Parse(string(info.data))
-				info.isTextTemplate = true
+			}
+		case mimeType == "application/javascript" ||
+			strings.HasPrefix(mimeType, "text/"):
+			// text template
+			info.templateName = info.localPath
+			info.isTemplate = true
+			info.isTextTemplate = true
+			_, err = s.ttmplBuilder.New(info.templateName).
+				Funcs(s.funcMap).Parse(string(info.data))
+			if err == nil {
+				var ttmpl *ttemplate.Template
+				ttmpl, err = s.ttmplBuilder.Clone()
 				if err == nil {
-					var ttmpl *ttemplate.Template
-					ttmpl, err = s.ttmplBuilder.Clone()
-					if err == nil {
-						s.ttmpl = ttmpl
-					}
+					s.ttmpl = ttmpl
 				}
 			}
 		}
 		if err != nil {
 			return fileInfo{err: err}
 		}
+	}
+	if !info.isTemplate && allowGzip {
+		var buf bytes.Buffer
+		zw, _ := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+		zw.Write(info.data)
+		zw.Close()
+		info.gzipData = buf.Bytes()
 	}
 	return info
 }
