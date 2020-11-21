@@ -119,7 +119,13 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 			} else {
 				logOutput.Write([]byte(line))
 			}
-			_ = perr
+			if perr != nil {
+				if log, ok := logOutput.(errLogger); ok {
+					log.Error(perr.Error())
+				} else {
+					logOutput.Write([]byte(perr.Error()))
+				}
+			}
 		}()
 		info := getStaticFile(s, path, r.URL.Path, r, pageData,
 			true, false, nil, allowGzip)
