@@ -7,6 +7,7 @@ package static
 import (
 	"bytes"
 	"crypto/sha1"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -144,7 +145,16 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 		} else {
 			code = 200
 		}
+		w.Header().Set("Content-Type", info.contentType)
+
 		data := info.data
+		if code != 200 {
+			// write the error asap
+			w.WriteHeader(code)
+			w.Write(data)
+			return
+		}
+
 		if allowGzip {
 			if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
 				w.Header().Set("Content-Encoding", "gzip")
@@ -167,9 +177,17 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 				}
 			}
 		}
+		sum := sha1.Sum(data)
+		etag := hex.EncodeToString(sum[:])
 		w.Header().Set("Content-Type", info.contentType)
-		w.WriteHeader(code)
-		w.Write(data)
+		if r.Header.Get("If-None-Match") == etag {
+			// write 304, but log 200
+			w.WriteHeader(304)
+		} else {
+			w.Header().Set("ETag", etag)
+			w.WriteHeader(code)
+			w.Write(data)
+		}
 	}, nil
 }
 
