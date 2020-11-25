@@ -306,6 +306,10 @@ func getStaticFile(s *site, root, path string, r *http.Request,
 			return
 		}
 		if info.err == nil && pageData != nil && info.isTemplate {
+		again:
+			if !execTemplate {
+				return
+			}
 			pdata, err := pageData(Page{
 				LocalPath:   info.localPath,
 				ContentType: info.contentType,
@@ -314,10 +318,6 @@ func getStaticFile(s *site, root, path string, r *http.Request,
 			})
 			if err != nil {
 				info.err = err
-				return
-			}
-		again:
-			if !execTemplate {
 				return
 			}
 			var out bytes.Buffer
