@@ -34,6 +34,10 @@ type Page struct {
 	ContentType string
 	Request     *http.Request
 	Error       error
+	Response    struct {
+		Cookies []*http.Cookie
+		Data    interface{}
+	}
 }
 
 type fileInfo struct {
@@ -45,6 +49,7 @@ type fileInfo struct {
 	gzipData       []byte
 	contentType    string
 	err            error
+	cookies        []*http.Cookie
 }
 
 type site struct {
@@ -63,7 +68,7 @@ type site struct {
 // Options for the handler
 type Options struct {
 	LogOutput io.Writer
-	PageData  func(page Page) (interface{}, error)
+	PageData  func(page *Page) error
 	FuncMap   map[string]interface{}
 	AllowGzip bool
 }
@@ -91,7 +96,7 @@ func dictFn(vals ...interface{}) (map[string]interface{}, error) {
 // serving from the specified path. The pageData function can be used to return
 // template data.
 func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
-	var pageData func(page Page) (interface{}, error)
+	var pageData func(page *Page) error
 	var logOutput io.Writer
 	var funcMap map[string]interface{}
 	var allowGzip bool
@@ -172,6 +177,9 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 			}
 		} else {
 			code = 200
+		}
+		for _, cookie := range info.cookies {
+			http.SetCookie(w, cookie)
 		}
 		w.Header().Set("Content-Type", info.contentType)
 
@@ -293,7 +301,7 @@ func newSite(path string, funcMap map[string]interface{}) *site {
 }
 
 func getStaticFile(s *site, root, path string, r *http.Request,
-	pageData func(page Page) (interface{}, error),
+	pageData func(page *Page) error,
 	execTemplate, allowUnderscore bool, externalError error,
 	allowGzip bool,
 ) (info fileInfo) {
@@ -309,12 +317,15 @@ func getStaticFile(s *site, root, path string, r *http.Request,
 			var pdata interface{}
 			var err error
 			if execTemplate {
-				pdata, err = pageData(Page{
+				page := &Page{
 					LocalPath:   info.localPath,
 					ContentType: info.contentType,
 					Request:     r,
 					Error:       externalError,
-				})
+				}
+				err = pageData(page)
+				pdata = page.Response.Data
+				info.cookies = page.Response.Cookies
 			}
 			if err != nil {
 				info.err = err
