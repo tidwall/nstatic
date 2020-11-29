@@ -323,7 +323,11 @@ func getStaticFile(s *site, root, path string, r *http.Request,
 					Request:     r,
 					Error:       externalError,
 				}
-				err = pageData(page)
+				func() {
+					s.mu.RUnlock()
+					defer s.mu.RLock()
+					err = pageData(page)
+				}()
 				pdata = page.Response.Data
 				info.cookies = page.Response.Cookies
 			}
