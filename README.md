@@ -1,6 +1,6 @@
-# static
+# nstatic
 
-**Very simple** static website handler for Go.
+Not a static website framework
 
 ## Example
 
@@ -11,11 +11,11 @@ import (
     "net/http"
     "log"
 
-    "github.com/tidwall/static"
+    "github.com/tidwall/nstatic"
 )
 
 func main() {
-    handler, err := static.NewHandlerFunc("static_files", nil)
+    handler, err := nstatic.NewHandlerFunc("website_root", nil)
     if err != nil {
         log.Fatal(err)
     }
@@ -23,4 +23,5 @@ func main() {
     log.Fatal(http.ListenAndServe(":8080", nil))
 }
 ```
+
 
