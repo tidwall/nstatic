@@ -1,4 +1,4 @@
-module github.com/tidwall/static
+module github.com/tidwall/nstatic
 
 go 1.15
 
