@@ -30,14 +30,28 @@ import (
 
 // A Page is passed to the pageData function
 type Page struct {
-	LocalPath   string
-	ContentType string
-	Request     *http.Request
-	Error       error
-	Response    struct {
+	Input struct {
+		Error       error
+		LocalPath   string
+		ContentType string
+		Request     *http.Request
+	}
+	Output struct {
 		Cookies []*http.Cookie
 		Data    interface{}
 	}
+}
+
+type dataRedirect string
+
+// Redirect will send an HTTP 302 with url as the Location.
+func (p *Page) Redirect(url string) {
+	p.Output.Data = dataRedirect(url)
+}
+
+// SetCookie adds a cookie to the HTTP response
+func (p *Page) SetCookie(cookie *http.Cookie) {
+	p.Output.Cookies = append(p.Output.Cookies, cookie)
 }
 
 type fileInfo struct {
@@ -50,6 +64,8 @@ type fileInfo struct {
 	contentType    string
 	err            error
 	cookies        []*http.Cookie
+	redirect       bool
+	redirectURL    string
 }
 
 type site struct {
@@ -139,7 +155,7 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 			elapsed := time.Since(start)
 			line := fmt.Sprintf("%d %s %s %s\n",
 				code, r.Method, r.URL.Path, formatSmallElapsed(elapsed))
-			if code == 200 {
+			if code < 400 {
 				logOutput.Write([]byte(line))
 			} else if log, ok := logOutput.(errLogger); ok {
 				log.Error(line)
@@ -177,10 +193,16 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 			}
 		} else {
 			code = 200
+			for _, cookie := range info.cookies {
+				http.SetCookie(w, cookie)
+			}
+			if info.redirect {
+				code = 302
+				w.Header().Set("Location", info.redirectURL)
+				w.WriteHeader(code)
+			}
 		}
-		for _, cookie := range info.cookies {
-			http.SetCookie(w, cookie)
-		}
+
 		w.Header().Set("Content-Type", info.contentType)
 
 		data := info.data
@@ -217,8 +239,8 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 		etag := hex.EncodeToString(sum[:])
 		w.Header().Set("Content-Type", info.contentType)
 		if r.Header.Get("If-None-Match") == etag {
-			// write 304, but log 200
-			w.WriteHeader(304)
+			code = 304
+			w.WriteHeader(code)
 		} else {
 			w.Header().Set("ETag", etag)
 			w.WriteHeader(code)
@@ -317,26 +339,29 @@ func getStaticFile(s *site, root, path string, r *http.Request,
 			var pdata interface{}
 			var err error
 			if execTemplate {
-				page := &Page{
-					LocalPath:   info.localPath,
-					ContentType: info.contentType,
-					Request:     r,
-					Error:       externalError,
-				}
+				page := new(Page)
+				page.Input.LocalPath = info.localPath
+				page.Input.ContentType = info.contentType
+				page.Input.Request = r
+				page.Input.Error = externalError
 				func() {
 					s.mu.RUnlock()
 					defer s.mu.RLock()
 					err = pageData(page)
 				}()
-				pdata = page.Response.Data
-				info.cookies = page.Response.Cookies
+				pdata = page.Output.Data
+				info.cookies = page.Output.Cookies
+				if url, ok := page.Output.Data.(dataRedirect); ok {
+					info.redirect = true
+					info.redirectURL = string(url)
+				}
 			}
 			if err != nil {
 				info.err = err
 				return
 			}
 		again:
-			if !execTemplate {
+			if !execTemplate || info.redirect {
 				return
 			}
 			var out bytes.Buffer
