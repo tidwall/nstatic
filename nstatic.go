@@ -7,7 +7,7 @@ package nstatic
 import (
 	"bytes"
 	"crypto/sha1"
-	"encoding/hex"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -54,18 +54,31 @@ func (p *Page) SetCookie(cookie *http.Cookie) {
 	p.Output.Cookies = append(p.Output.Cookies, cookie)
 }
 
+type dataOverride struct {
+	contentType string
+	body        []byte
+}
+
+// Override the HTTP response with the provide content.
+func (p *Page) Override(contentType string, body []byte) {
+	p.Output.Data = dataOverride{contentType, body}
+}
+
 type fileInfo struct {
-	localPath      string
-	templateName   string
-	isTemplate     bool
-	isTextTemplate bool
-	data           []byte
-	gzipData       []byte
-	contentType    string
-	err            error
-	cookies        []*http.Cookie
-	redirect       bool
-	redirectURL    string
+	localPath           string
+	templateName        string
+	isTemplate          bool
+	isTextTemplate      bool
+	data                []byte
+	gzipData            []byte
+	contentType         string
+	err                 error
+	cookies             []*http.Cookie
+	redirect            bool
+	redirectURL         string
+	override            bool
+	overrideContentType string
+	overrideBody        []byte
 }
 
 type site struct {
@@ -200,6 +213,11 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 				code = 302
 				w.Header().Set("Location", info.redirectURL)
 				w.WriteHeader(code)
+				return
+			}
+			if info.override {
+				info.contentType = info.overrideContentType
+				info.data = info.overrideBody
 			}
 		}
 
@@ -212,7 +230,6 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 			w.Write(data)
 			return
 		}
-
 		if allowGzip {
 			if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
 				w.Header().Set("Content-Encoding", "gzip")
@@ -235,9 +252,7 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 				}
 			}
 		}
-		sum := sha1.Sum(data)
-		etag := hex.EncodeToString(sum[:])
-		w.Header().Set("Content-Type", info.contentType)
+		etag := makeEtag(data)
 		if r.Header.Get("If-None-Match") == etag {
 			code = 304
 			w.WriteHeader(code)
@@ -247,6 +262,11 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 			w.Write(data)
 		}
 	}, nil
+}
+
+func makeEtag(body []byte) string {
+	sum := sha1.Sum(body)
+	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
 func formatSmallElapsed(elapsed time.Duration) string {
@@ -351,9 +371,14 @@ func getStaticFile(s *site, root, path string, r *http.Request,
 				}()
 				pdata = page.Output.Data
 				info.cookies = page.Output.Cookies
-				if url, ok := page.Output.Data.(dataRedirect); ok {
+				switch v := page.Output.Data.(type) {
+				case dataRedirect:
 					info.redirect = true
-					info.redirectURL = string(url)
+					info.redirectURL = string(v)
+				case dataOverride:
+					info.override = true
+					info.overrideContentType = v.contentType
+					info.overrideBody = v.body
 				}
 			}
 			if err != nil {
@@ -361,7 +386,7 @@ func getStaticFile(s *site, root, path string, r *http.Request,
 				return
 			}
 		again:
-			if !execTemplate || info.redirect {
+			if !execTemplate || info.redirect || info.override {
 				return
 			}
 			var out bytes.Buffer
