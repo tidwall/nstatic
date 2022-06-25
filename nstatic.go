@@ -79,6 +79,8 @@ type fileInfo struct {
 	override            bool
 	overrideContentType string
 	overrideBody        []byte
+	gzipEtag            string
+	etag                string
 }
 
 type site struct {
@@ -230,11 +232,13 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 			w.Write(data)
 			return
 		}
+		var etag string
 		if allowGzip {
 			if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
 				w.Header().Set("Content-Encoding", "gzip")
 				if len(info.gzipData) > 0 {
 					data = info.gzipData
+					etag = info.gzipEtag
 				} else {
 					sum := sha1.Sum(data)
 					key := fmt.Sprintf("%s:%d", sum[:], len(data))
@@ -250,9 +254,14 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 						s.gzipCache.Set(key, data)
 					}
 				}
+			} else {
+				etag = info.etag
 			}
 		}
-		etag := makeEtag(data)
+		if etag == "" {
+			etag = makeEtag(data)
+		}
+		// println(time.Since(start2))
 		if r.Header.Get("If-None-Match") == etag {
 			code = 304
 			w.WriteHeader(code)
@@ -286,6 +295,7 @@ func (s *site) bustCache() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cache = make(map[string]fileInfo)
+	s.gzipCache = tinylru.LRU{}
 	s.htmplBuilder = htemplate.New("")
 	s.ttmplBuilder = ttemplate.New("")
 	s.htmpl = htemplate.New("")
@@ -524,12 +534,14 @@ func getStaticFile(s *site, root, path string, r *http.Request,
 			return fileInfo{err: err}
 		}
 	}
+	info.etag = makeEtag(info.data)
 	if !info.isTemplate && allowGzip {
 		var buf bytes.Buffer
 		zw, _ := gzip.NewWriterLevel(&buf, gzip.BestCompression)
 		zw.Write(info.data)
 		zw.Close()
 		info.gzipData = buf.Bytes()
+		info.gzipEtag = makeEtag(info.gzipData)
 	}
 	return info
 }
