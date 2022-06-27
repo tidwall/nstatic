@@ -232,6 +232,12 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 			w.Write(data)
 			return
 		}
+
+		w.Header().Set("Accept-Ranges", "none")
+		if r.Header.Get("Range") != "" {
+
+		}
+
 		var etag string
 		if allowGzip {
 			if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
@@ -257,11 +263,14 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 			} else {
 				etag = info.etag
 			}
+		} else {
+			etag = info.etag
 		}
 		if etag == "" {
 			etag = makeEtag(data)
 		}
-		// println(time.Since(start2))
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
+
 		if r.Header.Get("If-None-Match") == etag {
 			code = 304
 			w.WriteHeader(code)
