@@ -181,7 +181,7 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 				if log, ok := logOutput.(errLogger); ok {
 					log.Error(perr.Error())
 				} else {
-					logOutput.Write([]byte(perr.Error()))
+					fmt.Fprintf(logOutput, "%s\n", perr)
 				}
 			}
 		}()
