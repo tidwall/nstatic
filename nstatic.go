@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"mime"
 	"net/http"
 	"os"
@@ -98,10 +99,11 @@ type site struct {
 
 // Options for the handler
 type Options struct {
-	LogOutput io.Writer
-	PageData  func(page *Page) error
-	FuncMap   map[string]interface{}
-	AllowGzip bool
+	LogOutput    io.Writer
+	PageData     func(page *Page) error
+	FuncMap      map[string]interface{}
+	AllowGzip    bool
+	RedirectHost string
 }
 
 type errLogger interface {
@@ -131,11 +133,13 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 	var logOutput io.Writer
 	var funcMap map[string]interface{}
 	var allowGzip bool
+	var redirectHost string
 	if opts != nil {
 		pageData = opts.PageData
 		logOutput = opts.LogOutput
 		funcMap = opts.FuncMap
 		allowGzip = opts.AllowGzip
+		redirectHost = opts.RedirectHost
 	}
 	if logOutput == nil {
 		logOutput = os.Stderr
@@ -163,6 +167,18 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 	s := newSite(path, funcMap)
 
 	return func(w http.ResponseWriter, r *http.Request) {
+		if redirectHost != "" && r.Host != redirectHost {
+			log.Printf("Redirecting from %s to %s", r.Host, redirectHost)
+			var location string
+			if r.TLS != nil {
+				location = "https://"
+			} else {
+				location = "http://"
+			}
+			location += redirectHost + r.URL.String()
+			http.Redirect(w, r, location, http.StatusMovedPermanently)
+			return
+		}
 		code := 0
 		start := time.Now()
 		var perr error
