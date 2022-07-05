@@ -56,13 +56,14 @@ func (p *Page) SetCookie(cookie *http.Cookie) {
 }
 
 type dataOverride struct {
+	statusCode  int
 	contentType string
 	body        []byte
 }
 
 // Override the HTTP response with the provide content.
-func (p *Page) Override(contentType string, body []byte) {
-	p.Output.Data = dataOverride{contentType, body}
+func (p *Page) Override(statusCode int, contentType string, body []byte) {
+	p.Output.Data = dataOverride{statusCode, contentType, body}
 }
 
 type fileInfo struct {
@@ -70,6 +71,7 @@ type fileInfo struct {
 	templateName        string
 	isTemplate          bool
 	isTextTemplate      bool
+	isAPIEndpoint       bool
 	data                []byte
 	gzipData            []byte
 	contentType         string
@@ -78,6 +80,7 @@ type fileInfo struct {
 	redirect            bool
 	redirectURL         string
 	override            bool
+	overrideStatusCode  int
 	overrideContentType string
 	overrideBody        []byte
 	gzipEtag            string
@@ -85,10 +88,11 @@ type fileInfo struct {
 }
 
 type site struct {
-	mu        sync.RWMutex
-	cache     map[string]fileInfo
-	funcMap   map[string]interface{}
-	gzipCache tinylru.LRU
+	mu           sync.RWMutex
+	cache        map[string]fileInfo
+	funcMap      map[string]interface{}
+	apiEndpoints map[string]bool
+	gzipCache    tinylru.LRU
 
 	ttmpl *ttemplate.Template
 	htmpl *htemplate.Template
@@ -104,6 +108,9 @@ type Options struct {
 	FuncMap      map[string]interface{}
 	AllowGzip    bool
 	RedirectHost string
+	// APIEndpoints are all the endpoints that are not backed by an html
+	// template.
+	APIEndpoints []string
 }
 
 type errLogger interface {
@@ -134,12 +141,14 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 	var funcMap map[string]interface{}
 	var allowGzip bool
 	var redirectHost string
+	var apiEndpoints []string
 	if opts != nil {
 		pageData = opts.PageData
 		logOutput = opts.LogOutput
 		funcMap = opts.FuncMap
 		allowGzip = opts.AllowGzip
 		redirectHost = opts.RedirectHost
+		apiEndpoints = opts.APIEndpoints
 	}
 	if logOutput == nil {
 		logOutput = os.Stderr
@@ -165,6 +174,12 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 	}
 
 	s := newSite(path, funcMap)
+	if len(apiEndpoints) > 0 {
+		s.apiEndpoints = make(map[string]bool)
+		for _, endpoint := range apiEndpoints {
+			s.apiEndpoints[endpoint] = true
+		}
+	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		if redirectHost != "" && r.Host != redirectHost {
@@ -236,11 +251,11 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 			if info.override {
 				info.contentType = info.overrideContentType
 				info.data = info.overrideBody
+				code = info.overrideStatusCode
 			}
 		}
 
 		w.Header().Set("Content-Type", info.contentType)
-
 		data := info.data
 		if code != 200 {
 			// write the error asap
@@ -250,10 +265,6 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 		}
 
 		w.Header().Set("Accept-Ranges", "none")
-		if r.Header.Get("Range") != "" {
-
-		}
-
 		var etag string
 		if allowGzip {
 			if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
@@ -384,13 +395,15 @@ func getStaticFile(s *site, root, path string, r *http.Request,
 ) (info fileInfo) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	apiEndpoint := s.apiEndpoints[path]
 	defer func() {
 		if !allowUnderscore && info.err == nil &&
 			strings.HasPrefix(filepath.Base(info.localPath), "_") {
 			info = fileInfo{err: os.ErrNotExist}
 			return
 		}
-		if info.err == nil && pageData != nil && info.isTemplate {
+		if info.err == nil && pageData != nil &&
+			(info.isTemplate || info.isAPIEndpoint) {
 			var pdata interface{}
 			var err error
 			if execTemplate {
@@ -412,6 +425,7 @@ func getStaticFile(s *site, root, path string, r *http.Request,
 					info.redirectURL = string(v)
 				case dataOverride:
 					info.override = true
+					info.overrideStatusCode = v.statusCode
 					info.overrideContentType = v.contentType
 					info.overrideBody = v.body
 				}
@@ -421,7 +435,7 @@ func getStaticFile(s *site, root, path string, r *http.Request,
 				return
 			}
 		again:
-			if !execTemplate || info.redirect || info.override {
+			if !execTemplate || info.redirect || info.override || apiEndpoint {
 				return
 			}
 			var out bytes.Buffer
@@ -456,6 +470,10 @@ func getStaticFile(s *site, root, path string, r *http.Request,
 			info.data = out.Bytes()
 		}
 	}()
+	if apiEndpoint {
+		info.isAPIEndpoint = true
+		return info
+	}
 
 	var ok bool
 	info, ok = s.cache[path]
