@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"mime"
 	"net/http"
 	"os"
@@ -183,7 +182,6 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		if redirectHost != "" && r.Host != redirectHost {
-			log.Printf("Redirecting from %s to %s", r.Host, redirectHost)
 			var location string
 			if r.TLS != nil {
 				location = "https://"
