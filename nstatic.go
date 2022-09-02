@@ -73,7 +73,6 @@ type fileInfo struct {
 	isTextTemplate      bool
 	isAPIEndpoint       bool
 	data                []byte
-	gzipData            []byte
 	contentType         string
 	err                 error
 	cookies             []*http.Cookie
@@ -83,8 +82,6 @@ type fileInfo struct {
 	overrideStatusCode  int
 	overrideContentType string
 	overrideBody        []byte
-	gzipEtag            string
-	etag                string
 }
 
 type site struct {
@@ -289,38 +286,26 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 
 		w.Header().Set("Accept-Ranges", "none")
 		var etag string
-		if allowGzip {
-			if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
-				w.Header().Set("Content-Encoding", "gzip")
-				if len(info.gzipData) > 0 {
-					data = info.gzipData
-					etag = info.gzipEtag
-				} else {
-					sum := sha1.Sum(data)
-					key := fmt.Sprintf("%s:%d", sum[:], len(data))
-					value, ok := s.gzipCache.Get(key)
-					if ok {
-						data = value.([]byte)
-					} else {
-						var buf bytes.Buffer
-						zw := gzip.NewWriter(&buf)
-						zw.Write(data)
-						zw.Close()
-						data = buf.Bytes()
-						s.gzipCache.Set(key, data)
-					}
-				}
+		if allowGzip &&
+			strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") &&
+			shouldGzipMimeType(info.contentType) {
+			w.Header().Set("Content-Encoding", "gzip")
+			sum := sha1.Sum(data)
+			key := fmt.Sprintf("%s:%d", sum[:], len(data))
+			value, ok := s.gzipCache.Get(key)
+			if ok {
+				data = value.([]byte)
 			} else {
-				etag = info.etag
+				var buf bytes.Buffer
+				zw := gzip.NewWriter(&buf)
+				zw.Write(data)
+				zw.Close()
+				data = buf.Bytes()
+				s.gzipCache.Set(key, data)
 			}
-		} else {
-			etag = info.etag
 		}
-		if etag == "" {
-			etag = makeEtag(data)
-		}
+		etag = makeEtag(data)
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
-
 		if r.Header.Get("If-None-Match") == etag {
 			code = 304
 			w.WriteHeader(code)
@@ -330,6 +315,18 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 			w.Write(data)
 		}
 	}, nil
+}
+
+func shouldGzipMimeType(mtype string) bool {
+	switch {
+	case strings.HasPrefix(mtype, "image/"):
+		return false
+	case strings.HasPrefix(mtype, "font/"):
+		return false
+	case strings.HasPrefix(mtype, "video/"):
+		return false
+	}
+	return true
 }
 
 func makeEtag(body []byte) string {
@@ -355,6 +352,7 @@ func (s *site) bustCache() {
 	defer s.mu.Unlock()
 	s.cache = make(map[string]fileInfo)
 	s.gzipCache = tinylru.LRU{}
+	s.gzipCache.Resize(5000)
 	s.htmplBuilder = htemplate.New("")
 	s.ttmplBuilder = ttemplate.New("")
 	s.htmpl = htemplate.New("")
@@ -607,15 +605,6 @@ func getStaticFile(s *site, root, path string, efs FS, r *http.Request,
 		if err != nil {
 			return fileInfo{err: err}
 		}
-	}
-	info.etag = makeEtag(info.data)
-	if !info.isTemplate && allowGzip {
-		var buf bytes.Buffer
-		zw, _ := gzip.NewWriterLevel(&buf, gzip.BestCompression)
-		zw.Write(info.data)
-		zw.Close()
-		info.gzipData = buf.Bytes()
-		info.gzipEtag = makeEtag(info.gzipData)
 	}
 	return info
 }
