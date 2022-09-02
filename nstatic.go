@@ -543,7 +543,8 @@ func getStaticFile(s *site, root, path string, efs FS, r *http.Request,
 		if strings.HasSuffix(path, "/") {
 			data, err = readFile(root + path + "index.html")
 		} else {
-			isdir, err := isDir(root+path, efs)
+			var isdir bool
+			isdir, err = isDir(root+path, efs)
 			if err != nil {
 				if os.IsNotExist(err) {
 					if strings.HasSuffix(path, "/index") {
