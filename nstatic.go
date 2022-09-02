@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"io/ioutil"
 	"mime"
 	"net/http"
@@ -100,6 +101,11 @@ type site struct {
 	htmplBuilder *htemplate.Template
 }
 
+type FS interface {
+	Open(path string) (fs.File, error)
+	ReadFile(path string) ([]byte, error)
+}
+
 // Options for the handler
 type Options struct {
 	LogOutput    io.Writer
@@ -110,6 +116,7 @@ type Options struct {
 	// APIEndpoints are all the endpoints that are not backed by an html
 	// template.
 	APIEndpoints []string
+	EmbeddedFS   FS
 }
 
 type errLogger interface {
@@ -141,6 +148,7 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 	var allowGzip bool
 	var redirectHost string
 	var apiEndpoints []string
+	var efs FS
 	if opts != nil {
 		pageData = opts.PageData
 		logOutput = opts.LogOutput
@@ -148,6 +156,7 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 		allowGzip = opts.AllowGzip
 		redirectHost = opts.RedirectHost
 		apiEndpoints = opts.APIEndpoints
+		efs = opts.EmbeddedFS
 	}
 	if logOutput == nil {
 		logOutput = os.Stderr
@@ -160,19 +169,27 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 		funcMap["dict"] = dictFn
 	}
 
-	path, err := filepath.Abs(path)
-	if err != nil {
-		return nil, err
-	}
-	fi, err := os.Stat(path)
-	if err != nil {
-		return nil, err
-	}
-	if !fi.IsDir() {
-		return nil, fmt.Errorf("invalid path: %s: not a directory", path)
+	if path != "" {
+		var err error
+		path, err = filepath.Abs(path)
+		if err != nil {
+			return nil, err
+		}
+		fi, err := os.Stat(path)
+		if err != nil {
+			return nil, err
+		}
+		if !fi.IsDir() {
+			return nil, fmt.Errorf("invalid path: %s: not a directory", path)
+		}
+		efs = nil
+	} else if efs != nil {
+		logOutput.Write([]byte("Embedded filesystem"))
+	} else {
+		return nil, fmt.Errorf("A path or embedded FS is required")
 	}
 
-	s := newSite(path, funcMap)
+	s := newSite(path, efs, funcMap)
 	if len(apiEndpoints) > 0 {
 		s.apiEndpoints = make(map[string]bool)
 		for _, endpoint := range apiEndpoints {
@@ -214,25 +231,33 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 				}
 			}
 		}()
-		info := getStaticFile(s, path, r.URL.Path, r, pageData,
+		info := getStaticFile(s, path, r.URL.Path, efs, r, pageData,
 			true, false, nil, allowGzip)
 		if info.err != nil {
 			if os.IsNotExist(info.err) {
 				code = 404
-				info = getStaticFile(s, path, "/_404", r, pageData,
+				info = getStaticFile(s, path, "/_404", efs, r, pageData,
 					true, true, nil, allowGzip)
 				if info.err != nil {
-					http.NotFound(w, r)
-					return
+					info = getStaticFile(s, path, "/~404", efs, r, pageData,
+						true, true, nil, allowGzip)
+					if info.err != nil {
+						http.NotFound(w, r)
+						return
+					}
 				}
 			} else {
 				code = 500
 				perr = info.err
-				info = getStaticFile(s, path, "/_500", r, pageData,
+				info = getStaticFile(s, path, "/_500", efs, r, pageData,
 					true, true, info.err, allowGzip)
 				if info.err != nil {
-					http.Error(w, "500 Internal Server Error", code)
-					return
+					info = getStaticFile(s, path, "/~500", efs, r, pageData,
+						true, true, info.err, allowGzip)
+					if info.err != nil {
+						http.Error(w, "500 Internal Server Error", code)
+						return
+					}
 				}
 			}
 		} else {
@@ -337,10 +362,13 @@ func (s *site) bustCache() {
 
 }
 
-func newSite(path string, funcMap map[string]interface{}) *site {
+func newSite(path string, efs FS, funcMap map[string]interface{}) *site {
 	s := &site{}
 	s.bustCache()
 	s.funcMap = funcMap
+	if efs != nil {
+		return s
+	}
 	go func() {
 		for {
 			func() {
@@ -386,7 +414,7 @@ func newSite(path string, funcMap map[string]interface{}) *site {
 	return s
 }
 
-func getStaticFile(s *site, root, path string, r *http.Request,
+func getStaticFile(s *site, root, path string, efs FS, r *http.Request,
 	pageData func(page *Page) error,
 	execTemplate, allowUnderscore bool, externalError error,
 	allowGzip bool,
@@ -396,7 +424,8 @@ func getStaticFile(s *site, root, path string, r *http.Request,
 	apiEndpoint := s.apiEndpoints[path]
 	defer func() {
 		if !allowUnderscore && info.err == nil &&
-			strings.HasPrefix(filepath.Base(info.localPath), "_") {
+			(strings.HasPrefix(filepath.Base(info.localPath), "_") ||
+				strings.HasPrefix(filepath.Base(info.localPath), "~")) {
 			info = fileInfo{err: os.ErrNotExist}
 			return
 		}
@@ -451,7 +480,7 @@ func getStaticFile(s *site, root, path string, r *http.Request,
 					func() {
 						s.mu.RUnlock()
 						defer s.mu.RLock()
-						sinfo := getStaticFile(s, root, "/"+name, r,
+						sinfo := getStaticFile(s, root, "/"+name, efs, r,
 							pageData, false, true, nil, allowGzip)
 						if sinfo.err == nil {
 							info.err = nil
@@ -493,6 +522,10 @@ func getStaticFile(s *site, root, path string, r *http.Request,
 	var localPath string
 	readFile := func(path string) ([]byte, error) {
 		localPath = path[len(root)+1:]
+		if efs != nil {
+			// path = path[1:]
+			return efs.ReadFile(path)
+		}
 		return ioutil.ReadFile(path)
 	}
 
@@ -510,8 +543,7 @@ func getStaticFile(s *site, root, path string, r *http.Request,
 		if strings.HasSuffix(path, "/") {
 			data, err = readFile(root + path + "index.html")
 		} else {
-			var stat os.FileInfo
-			stat, err = os.Stat(root + path)
+			isdir, err := isDir(root+path, efs)
 			if err != nil {
 				if os.IsNotExist(err) {
 					if strings.HasSuffix(path, "/index") {
@@ -523,7 +555,7 @@ func getStaticFile(s *site, root, path string, r *http.Request,
 					tpath := "/" + strings.Replace(path, "/", "$", -1)[1:]
 					data, err = readFile(root + tpath + ".html")
 				}
-			} else if stat.IsDir() {
+			} else if isdir {
 				data, err = readFile(root + path + "/index.html")
 			} else {
 				data, err = readFile(root + path)
@@ -585,6 +617,26 @@ func getStaticFile(s *site, root, path string, r *http.Request,
 		info.gzipEtag = makeEtag(info.gzipData)
 	}
 	return info
+}
+
+func isDir(path string, efs FS) (bool, error) {
+	var stat fs.FileInfo
+	var err error
+	if efs != nil {
+		var f fs.File
+		f, err = efs.Open(path)
+		if err != nil {
+			return false, err
+		}
+		defer f.Close()
+		stat, err = f.Stat()
+	} else {
+		stat, err = os.Stat(path)
+	}
+	if err != nil {
+		return false, err
+	}
+	return stat.IsDir(), nil
 }
 
 func (info fileInfo) plainContenType() string {
