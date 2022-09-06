@@ -247,10 +247,10 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 				code = 500
 				perr = info.err
 				info = getStaticFile(s, path, "/_500", efs, r, pageData,
-					true, true, info.err, allowGzip)
+					true, true, perr, allowGzip)
 				if info.err != nil {
 					info = getStaticFile(s, path, "/~500", efs, r, pageData,
-						true, true, info.err, allowGzip)
+						true, true, perr, allowGzip)
 					if info.err != nil {
 						http.Error(w, "500 Internal Server Error", code)
 						return
