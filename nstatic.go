@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"io/ioutil"
 	"mime"
 	"net/http"
 	"os"
@@ -74,6 +73,7 @@ type fileInfo struct {
 	isAPIEndpoint       bool
 	data                []byte
 	contentType         string
+	cacheControl        string
 	err                 error
 	cookies             []*http.Cookie
 	redirect            bool
@@ -110,6 +110,7 @@ type Options struct {
 	FuncMap      map[string]interface{}
 	AllowGzip    bool
 	RedirectHost string
+	CacheControl func(path string) string
 	// APIEndpoints are all the endpoints that are not backed by an html
 	// template.
 	APIEndpoints []string
@@ -140,6 +141,7 @@ func dictFn(vals ...interface{}) (map[string]interface{}, error) {
 // template data.
 func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 	var pageData func(page *Page) error
+	var cacheControl func(path string) string
 	var logOutput io.Writer
 	var funcMap map[string]interface{}
 	var allowGzip bool
@@ -148,6 +150,7 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 	var efs FS
 	if opts != nil {
 		pageData = opts.PageData
+		cacheControl = opts.CacheControl
 		logOutput = opts.LogOutput
 		funcMap = opts.FuncMap
 		allowGzip = opts.AllowGzip
@@ -183,7 +186,7 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 	} else if efs != nil {
 		logOutput.Write([]byte("Embedded filesystem"))
 	} else {
-		return nil, fmt.Errorf("A path or embedded FS is required")
+		return nil, fmt.Errorf("a path or embedded FS is required")
 	}
 
 	s := newSite(path, efs, funcMap)
@@ -229,15 +232,15 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 			}
 		}()
 		info := getStaticFile(s, path, r.URL.Path, efs, r, pageData,
-			true, false, nil, allowGzip)
+			cacheControl, true, false, nil, allowGzip)
 		if info.err != nil {
 			if os.IsNotExist(info.err) {
 				code = 404
 				info = getStaticFile(s, path, "/_404", efs, r, pageData,
-					true, true, nil, allowGzip)
+					cacheControl, true, true, nil, allowGzip)
 				if info.err != nil {
 					info = getStaticFile(s, path, "/~404", efs, r, pageData,
-						true, true, nil, allowGzip)
+						cacheControl, true, true, nil, allowGzip)
 					if info.err != nil {
 						http.NotFound(w, r)
 						return
@@ -247,10 +250,10 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 				code = 500
 				perr = info.err
 				info = getStaticFile(s, path, "/_500", efs, r, pageData,
-					true, true, perr, allowGzip)
+					cacheControl, true, true, perr, allowGzip)
 				if info.err != nil {
 					info = getStaticFile(s, path, "/~500", efs, r, pageData,
-						true, true, perr, allowGzip)
+						cacheControl, true, true, perr, allowGzip)
 					if info.err != nil {
 						http.Error(w, "500 Internal Server Error", code)
 						return
@@ -304,6 +307,11 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 				s.gzipCache.Set(key, data)
 			}
 		}
+
+		if info.cacheControl != "" {
+			w.Header().Set("Cache-Control", info.cacheControl)
+		}
+
 		etag = makeEtag(data)
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
 		if r.Header.Get("If-None-Match") == etag {
@@ -413,7 +421,7 @@ func newSite(path string, efs FS, funcMap map[string]interface{}) *site {
 }
 
 func getStaticFile(s *site, root, path string, efs FS, r *http.Request,
-	pageData func(page *Page) error,
+	pageData func(page *Page) error, cacheControl func(path string) string,
 	execTemplate, allowUnderscore bool, externalError error,
 	allowGzip bool,
 ) (info fileInfo) {
@@ -479,7 +487,7 @@ func getStaticFile(s *site, root, path string, efs FS, r *http.Request,
 						s.mu.RUnlock()
 						defer s.mu.RLock()
 						sinfo := getStaticFile(s, root, "/"+name, efs, r,
-							pageData, false, true, nil, allowGzip)
+							pageData, cacheControl, false, true, nil, allowGzip)
 						if sinfo.err == nil {
 							info.err = nil
 						} else if !os.IsNotExist(sinfo.err) {
@@ -493,6 +501,9 @@ func getStaticFile(s *site, root, path string, efs FS, r *http.Request,
 				return
 			}
 			info.data = out.Bytes()
+		}
+		if info.err == nil && cacheControl != nil {
+			info.cacheControl = cacheControl(info.localPath)
 		}
 	}()
 	if apiEndpoint {
@@ -524,7 +535,7 @@ func getStaticFile(s *site, root, path string, efs FS, r *http.Request,
 			// path = path[1:]
 			return efs.ReadFile(path)
 		}
-		return ioutil.ReadFile(path)
+		return os.ReadFile(path)
 	}
 
 	var data []byte
