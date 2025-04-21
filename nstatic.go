@@ -235,6 +235,20 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 			cacheControl, true, false, nil, allowGzip)
 		if info.err != nil {
 			if os.IsNotExist(info.err) {
+				if strings.HasSuffix(r.URL.Path, "/") {
+					ppath := path + r.URL.Path[:len(r.URL.Path)-1] + ".html"
+					if _, err := os.Stat(ppath); err == nil {
+						var url string
+						if r.TLS != nil {
+							url = "https://"
+						} else {
+							url = "http://"
+						}
+						url += r.Host + r.URL.Path[:len(r.URL.Path)-1]
+						http.Redirect(w, r, url, http.StatusMovedPermanently)
+						return
+					}
+				}
 				code = 404
 				info = getStaticFile(s, path, "/_404", efs, r, pageData,
 					cacheControl, true, true, nil, allowGzip)
@@ -537,7 +551,7 @@ func getStaticFile(s *site, root, path string, efs FS, r *http.Request,
 		}
 		return os.ReadFile(path)
 	}
-
+	// again:
 	var data []byte
 	var err error
 	if !execTemplate {
