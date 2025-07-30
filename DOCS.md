@@ -39,7 +39,7 @@ func main() {
 </html>
 ```
 
-## Includes
+## Server side includes
 
 Here's an example of header/footer style includes
 
