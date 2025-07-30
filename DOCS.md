@@ -38,3 +38,35 @@ func main() {
 </body>
 </html>
 ```
+
+## Includes
+
+Here's an example of header/footer style includes
+
+**website_root/index.html**
+
+```html
+{{ template "_header.html" "Title" "Homepage" }}
+
+<h1>Single page website</h1>
+
+{{ template "_footer.html" }}
+```
+
+**website_root/_header.html**
+
+```html
+<html>
+<head>
+<title>{{ .Title }}</title>
+</head>
+<body>
+```
+
+
+**website_root/_footer.html**
+
+```html
+</body>
+</html>
+```
