@@ -4,7 +4,7 @@
 
 The most basic website:
 
-** main.go **
+**main.go**
 
 ```go
 package main
@@ -26,7 +26,7 @@ func main() {
 }
 ```
 
-** website_root/index.html **
+**website_root/index.html**
 
 ```html
 <html>
