@@ -249,6 +249,7 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 						return
 					}
 				}
+
 				code = 404
 				info = getStaticFile(s, path, "/_404", efs, r, pageData,
 					cacheControl, true, true, nil, allowGzip)
@@ -554,35 +555,47 @@ func getStaticFile(s *site, root, path string, efs FS, r *http.Request,
 	// again:
 	var data []byte
 	var err error
+	trys := 1
+	wpath := path
+tryAgain:
 	if !execTemplate {
-		data, err = readFile(root + path)
+		data, err = readFile(root + wpath)
 	} else {
-		if strings.HasSuffix(path, ".html") {
+		if strings.HasSuffix(wpath, ".html") {
 			return fileInfo{err: os.ErrNotExist}
 		}
-		if strings.Contains(path, "..") {
+		if strings.Contains(wpath, "..") {
 			return fileInfo{err: os.ErrNotExist}
 		}
-		if strings.HasSuffix(path, "/") {
-			data, err = readFile(root + path + "index.html")
+		if strings.HasSuffix(wpath, "/") {
+			data, err = readFile(root + wpath + "index.html")
 		} else {
 			var isdir bool
-			isdir, err = isDir(root+path, efs)
+			isdir, err = isDir(root+wpath, efs)
 			if err != nil {
 				if os.IsNotExist(err) {
-					if strings.HasSuffix(path, "/index") {
+					if strings.HasSuffix(wpath, "/index") {
 						return fileInfo{err: err}
 					}
-					data, err = readFile(root + path + ".html")
+					data, err = readFile(root + wpath + ".html")
 				}
 				if os.IsNotExist(err) {
-					tpath := "/" + strings.Replace(path, "/", "$", -1)[1:]
-					data, err = readFile(root + tpath + ".html")
+					twpath := "/" + strings.Replace(wpath, "/", "$", -1)[1:]
+					data, err = readFile(root + twpath + ".html")
 				}
 			} else if isdir {
-				data, err = readFile(root + path + "/index.html")
+				data, err = readFile(root + wpath + "/index.html")
 			} else {
-				data, err = readFile(root + path)
+				data, err = readFile(root + wpath)
+			}
+			if os.IsNotExist(err) {
+				if trys == 1 {
+					parts := strings.Split(wpath, "/")
+					parts[len(parts)-1] = "?"
+					wpath = strings.Join(parts, "/")
+					trys++
+					goto tryAgain
+				}
 			}
 		}
 	}
