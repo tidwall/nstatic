@@ -32,6 +32,7 @@ import (
 type Page struct {
 	Input struct {
 		Error       error
+		NotFound    bool
 		LocalPath   string
 		ContentType string
 		Request     *http.Request
@@ -65,6 +66,13 @@ func (p *Page) Override(statusCode int, contentType string, body []byte) {
 	p.Output.Data = dataOverride{statusCode, contentType, body}
 }
 
+type dataNotFound struct{}
+
+// NotFound force displays 404 Not Found.
+func (p *Page) NotFound() {
+	p.Output.Data = dataNotFound{}
+}
+
 type fileInfo struct {
 	localPath           string
 	templateName        string
@@ -78,6 +86,7 @@ type fileInfo struct {
 	cookies             []*http.Cookie
 	redirect            bool
 	redirectURL         string
+	forceNotFound       bool
 	override            bool
 	overrideStatusCode  int
 	overrideContentType string
@@ -232,9 +241,9 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 			}
 		}()
 		info := getStaticFile(s, path, r.URL.Path, efs, r, pageData,
-			cacheControl, true, false, nil, allowGzip)
-		if info.err != nil {
-			if os.IsNotExist(info.err) {
+			cacheControl, true, false, nil, false, allowGzip)
+		if info.err != nil || info.forceNotFound {
+			if info.forceNotFound || os.IsNotExist(info.err) {
 				if strings.HasSuffix(r.URL.Path, "/") {
 					ppath := path + r.URL.Path[:len(r.URL.Path)-1] + ".html"
 					if _, err := os.Stat(ppath); err == nil {
@@ -249,13 +258,12 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 						return
 					}
 				}
-
 				code = 404
 				info = getStaticFile(s, path, "/_404", efs, r, pageData,
-					cacheControl, true, true, nil, allowGzip)
+					cacheControl, true, true, nil, true, allowGzip)
 				if info.err != nil {
 					info = getStaticFile(s, path, "/~404", efs, r, pageData,
-						cacheControl, true, true, nil, allowGzip)
+						cacheControl, true, true, nil, true, allowGzip)
 					if info.err != nil {
 						http.NotFound(w, r)
 						return
@@ -265,10 +273,10 @@ func NewHandlerFunc(path string, opts *Options) (http.HandlerFunc, error) {
 				code = 500
 				perr = info.err
 				info = getStaticFile(s, path, "/_500", efs, r, pageData,
-					cacheControl, true, true, perr, allowGzip)
+					cacheControl, true, true, perr, false, allowGzip)
 				if info.err != nil {
 					info = getStaticFile(s, path, "/~500", efs, r, pageData,
-						cacheControl, true, true, perr, allowGzip)
+						cacheControl, true, true, perr, false, allowGzip)
 					if info.err != nil {
 						http.Error(w, "500 Internal Server Error", code)
 						return
@@ -437,7 +445,7 @@ func newSite(path string, efs FS, funcMap map[string]interface{}) *site {
 
 func getStaticFile(s *site, root, path string, efs FS, r *http.Request,
 	pageData func(page *Page) error, cacheControl func(path string) string,
-	execTemplate, allowUnderscore bool, externalError error,
+	execTemplate, allowUnderscore bool, externalError error, notFound bool,
 	allowGzip bool,
 ) (info fileInfo) {
 	s.mu.RLock()
@@ -460,6 +468,7 @@ func getStaticFile(s *site, root, path string, efs FS, r *http.Request,
 				page.Input.ContentType = info.contentType
 				page.Input.Request = r
 				page.Input.Error = externalError
+				page.Input.NotFound = notFound
 				func() {
 					s.mu.RUnlock()
 					defer s.mu.RLock()
@@ -476,6 +485,8 @@ func getStaticFile(s *site, root, path string, efs FS, r *http.Request,
 					info.overrideStatusCode = v.statusCode
 					info.overrideContentType = v.contentType
 					info.overrideBody = v.body
+				case dataNotFound:
+					info.forceNotFound = true
 				}
 			}
 			if err != nil {
@@ -483,7 +494,8 @@ func getStaticFile(s *site, root, path string, efs FS, r *http.Request,
 				return
 			}
 		again:
-			if !execTemplate || info.redirect || info.override || apiEndpoint {
+			if !execTemplate || info.redirect || info.override || apiEndpoint ||
+				info.forceNotFound {
 				return
 			}
 			var out bytes.Buffer
@@ -502,7 +514,8 @@ func getStaticFile(s *site, root, path string, efs FS, r *http.Request,
 						s.mu.RUnlock()
 						defer s.mu.RLock()
 						sinfo := getStaticFile(s, root, "/"+name, efs, r,
-							pageData, cacheControl, false, true, nil, allowGzip)
+							pageData, cacheControl, false, true, nil,
+							false, allowGzip)
 						if sinfo.err == nil {
 							info.err = nil
 						} else if !os.IsNotExist(sinfo.err) {
